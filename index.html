@@ -3579,10 +3579,37 @@
 ];
     const INITIAL_EXAM_CYCLES = [
   "Regular",
-  "Re-Exam",
-  "Revaluation (GR)",
-  "Convocation/Annual"
+  "Re-Exam"
 ];
+
+function normalizeExamCycles(cycles) {
+  const valid = ["Regular", "Re-Exam"];
+  if (!Array.isArray(cycles) || cycles.length === 0) return [...valid];
+  const cleaned = cycles.filter(c => valid.includes(c));
+  valid.forEach(v => {
+    if (!cleaned.includes(v)) cleaned.push(v);
+  });
+  return cleaned;
+}
+
+function getActivityExamScope(activity) {
+  if (!activity) return "BOTH";
+  if (activity.examScope && ["REGULAR_ONLY", "REEXAM_ONLY", "BOTH"].includes(activity.examScope)) {
+    return activity.examScope;
+  }
+  const ph = activity.phase || "";
+  if (ph.startsWith("Phase 6")) return "REEXAM_ONLY";
+  if (ph.startsWith("Phase 7")) return "BOTH";
+  return "REGULAR_ONLY";
+}
+
+function isActivityApplicableForCycle(activity, examCycle) {
+  const scope = getActivityExamScope(activity);
+  if (scope === "BOTH") return true;
+  if (examCycle === "Regular" && scope === "REGULAR_ONLY") return true;
+  if (examCycle === "Re-Exam" && scope === "REEXAM_ONLY") return true;
+  return false;
+}
 
     
 const INITIAL_PHASES = [
@@ -3666,6 +3693,7 @@ function computeUserActionableItems(activities, contextsMap, config, currentUser
     const logs = ctxData?.logs || {};
 
     activities.forEach(act => {
+      if (!isActivityApplicableForCycle(act, cycle)) return;
       const log = logs[act.id] || {};
       if (log.isNA) return;
 
@@ -3985,6 +4013,9 @@ class StorageService {
         const configDoc = await db.collection('exam_portal_config').doc('master_data').get();
         if (configDoc.exists) {
           config = configDoc.data();
+          if (config && config.examCycles) {
+            config.examCycles = normalizeExamCycles(config.examCycles);
+          }
         } else {
           await db.collection('exam_portal_config').doc('master_data').set(config);
         }
@@ -4108,7 +4139,11 @@ class StorageService {
       const unsubConfig = db.collection('exam_portal_config').doc('master_data')
         .onSnapshot((doc) => {
           if (doc.exists && callbacks.onConfigUpdate) {
-            callbacks.onConfigUpdate(doc.data());
+            const cfgData = doc.data();
+            if (cfgData && cfgData.examCycles) {
+              cfgData.examCycles = normalizeExamCycles(cfgData.examCycles);
+            }
+            callbacks.onConfigUpdate(cfgData);
           }
         }, (err) => console.warn("Firestore config listener error:", err));
       unsubs.push(unsubConfig);
@@ -4210,14 +4245,28 @@ function exportCurrentViewExcel(activities, currentLogs, context, headerMetrics)
 
   // Session Summary Metrics
   rows.push(["SESSION METADATA SUMMARY"]);
-  rows.push([
-    "Exam Month & Year", headerMetrics.examMonthYear || formatExamMonthYear(currentLogs["act_23"]?.performedDate || currentLogs["act_135"]?.performedDate) || "N/A",
-    "Total Students", headerMetrics.totalStudents || 0,
-    "PWD Students", headerMetrics.pwdStudents || 0,
-    "Debarred Students", headerMetrics.debarredStudents || 0,
-    "UFM Cases Pending", headerMetrics.ufmCases || 0,
-    "Modules (WRIT)", headerMetrics.numModules || 0
-  ]);
+  if (context.examCycle === "Re-Exam") {
+    rows.push([
+      "Exam Month & Year", headerMetrics.examMonthYear || formatExamMonthYear(currentLogs["act_135"]?.performedDate || currentLogs["act_23"]?.performedDate) || "N/A",
+      "Total Appearing Students", headerMetrics.totalStudents || 0,
+      "Regular Batch Students", headerMetrics.regBatchStudents || 0,
+      "Prev. Year / Backlog Students", headerMetrics.prevBatchStudents || 0,
+      "Appearing Batches", headerMetrics.appearingBatches || "Current + Prior Batches",
+      "PWD Students", headerMetrics.pwdStudents || 0,
+      "Debarred Students", headerMetrics.debarredStudents || 0,
+      "UFM Cases Pending", headerMetrics.ufmCases || 0,
+      "Modules (WRIT)", headerMetrics.numModules || 0
+    ]);
+  } else {
+    rows.push([
+      "Exam Month & Year", headerMetrics.examMonthYear || formatExamMonthYear(currentLogs["act_23"]?.performedDate || currentLogs["act_135"]?.performedDate) || "N/A",
+      "Total Students", headerMetrics.totalStudents || 0,
+      "PWD Students", headerMetrics.pwdStudents || 0,
+      "Debarred Students", headerMetrics.debarredStudents || 0,
+      "UFM Cases Pending", headerMetrics.ufmCases || 0,
+      "Modules (WRIT)", headerMetrics.numModules || 0
+    ]);
+  }
   rows.push([]);
 
   // Table Headers
@@ -4245,7 +4294,9 @@ function exportCurrentViewExcel(activities, currentLogs, context, headerMetrics)
     "COE Sign-off"
   ]);
 
-  activities.forEach(act => {
+  const applicableActivities = activities.filter(act => isActivityApplicableForCycle(act, context.examCycle));
+
+  applicableActivities.forEach(act => {
     const log = currentLogs[act.id] || {};
     const status = computeActivityStatus(act, log, context.semester);
 
@@ -4337,7 +4388,7 @@ function exportFullDatabaseExcel(activities, contexts, config, users) {
 
   // Sheet 2: Header_Metrics
   const metricRows = [
-    ["Context Key", "College", "Batch", "Exam Month & Year", "Program", "Semester", "Exam Cycle", "Total Students", "PWD Students", "Debarred Students", "UFM Cases", "Modules (WRIT)"]
+    ["Context Key", "College", "Batch", "Exam Month & Year", "Program", "Semester", "Exam Cycle", "Total Students", "Reg Batch Students", "Prev Batch Students", "Appearing Batches", "PWD Students", "Debarred Students", "UFM Cases", "Modules (WRIT)"]
   ];
   Object.entries(contexts).forEach(([ctxKey, ctxData]) => {
     const parts = ctxKey.split('__');
@@ -4348,6 +4399,9 @@ function exportFullDatabaseExcel(activities, contexts, config, users) {
       m.examMonthYear || "",
       cProgram, cSem, cCycle,
       m.totalStudents || 0,
+      m.regBatchStudents || 0,
+      m.prevBatchStudents || 0,
+      m.appearingBatches || "",
       m.pwdStudents || 0,
       m.debarredStudents || 0,
       m.ufmCases || 0,
@@ -4359,11 +4413,12 @@ function exportFullDatabaseExcel(activities, contexts, config, users) {
 
   // Sheet 3: Master_Activities
   const actRows = [
-    ["Sr. No.", "Activity Name", "Phase", "Maker Role", "Condition Rule", "Required Verifiers"]
+    ["Sr. No.", "Activity Name", "Phase", "Maker Role", "Condition Rule", "Exam Scope", "Required Verifiers"]
   ];
   activities.forEach(act => {
     actRows.push([
       act.srNo, act.name, act.phase, act.performedBy, act.cond,
+      getActivityExamScope(act),
       (act.requiredVerifiers || []).join(', ')
     ]);
   });
@@ -4386,6 +4441,78 @@ function exportFullDatabaseExcel(activities, contexts, config, users) {
   XLSX.utils.book_append_sheet(wb, wsStaff, "Staff_Directory");
 
   XLSX.writeFile(wb, `SVKM_Exam_Tracker_MultiCollege_Database_${getTodayYYYYMMDD()}.xlsx`);
+}
+
+function exportExecutiveDashboardExcel(filteredSessions, summary, filterState, config) {
+  if (!window.XLSX) {
+    if (window.showPortalToast) window.showPortalToast("SheetJS library is still loading. Please try again in a moment.", "warning");
+    return;
+  }
+
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Executive_Summary
+  const summaryRows = [
+    ["SVKM'S CONTROLLER OF EXAMINATIONS DIVISION (CED)"],
+    ["EXECUTIVE DASHBOARD & EXAMINATION COMPLIANCE SUMMARY"],
+    [
+      "Academic Year Filter:", filterState.batch || "ALL",
+      "College Filter:", filterState.college || "ALL",
+      "Cycle Filter:", filterState.cycle || "ALL",
+      "Semester Filter:", filterState.sem || "ALL"
+    ],
+    ["Export Timestamp:", new Date().toLocaleString()],
+    [],
+    ["EXECUTIVE KEY PERFORMANCE INDICATORS"],
+    ["Overall Compliance %", `${summary.overallPct}%`],
+    ["Completed Tasks", summary.totalCompleted],
+    ["Total Applicable Tasks", summary.totalActiveTasks],
+    ["Active Queries Flagged", summary.totalQueries],
+    ["Total Students", summary.totalStudents],
+    ["Regular Batch Students", summary.totalRegStudents || 0],
+    ["Prev. Year / Backlog Students", summary.totalPrevStudents || 0],
+    ["PWD Students (Writer / Comp. Time)", summary.totalPwd],
+    ["Debarred Students (Defaulters)", summary.totalDebarred],
+    ["UFM Pending Cases (UMIC)", summary.totalUfm]
+  ];
+  const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+  XLSX.utils.book_append_sheet(wb, wsSummary, "Executive_Summary");
+
+  // Sheet 2: Detailed_Status_Report
+  const sessionRows = [
+    [
+      "Acad. Year", "College Code", "College Name", "Program", "Semester", "Exam Cycle",
+      "Exam Month & Year", "Total Students", "Reg Batch Students", "Prev Yr Students",
+      "Appearing Batches", "PWD Students", "Debarred Students", "UFM Cases",
+      "Completed Tasks", "Applicable Tasks", "Compliance %", "Active Queries"
+    ]
+  ];
+  filteredSessions.forEach(s => {
+    sessionRows.push([
+      s.batch,
+      s.college,
+      s.collegeName || s.college,
+      s.program,
+      s.semester,
+      s.examCycle,
+      s.examMonthYear || "N/A",
+      s.totalStudents,
+      s.regBatchStudents || 0,
+      s.prevBatchStudents || 0,
+      s.appearingBatches || "",
+      s.pwdStudents,
+      s.debarredStudents,
+      s.ufmCases,
+      s.completedTasks,
+      s.applicableTasks,
+      `${s.progressPct}%`,
+      s.queries
+    ]);
+  });
+  const wsSessions = XLSX.utils.aoa_to_sheet(sessionRows);
+  XLSX.utils.book_append_sheet(wb, wsSessions, "Detailed_Status_Report");
+
+  XLSX.writeFile(wb, `SVKM_Executive_Exam_Report_${getTodayYYYYMMDD()}.xlsx`);
 }
 
 function downloadJsonBackup(fullData) {
@@ -5431,7 +5558,7 @@ function ContextBar({
           {/* Batch */}
           <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1 rounded-xl border border-slate-200 dark:border-slate-700">
             <Icon name="calendar" size={14} className="text-indigo-600 dark:text-indigo-400" />
-            <span className="font-semibold text-slate-500">Batch:</span>
+            <span className="font-semibold text-slate-500">Acad. Year:</span>
             <select
               value={context.batch}
               onChange={(e) => setContext(prev => ({ ...prev, batch: e.target.value }))}
@@ -5540,17 +5667,42 @@ function HeaderMetricsCards({
     <div className="my-3 no-print">
       <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2.5">
         
-        {/* 1: BATCH */}
-        <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
-          <div className="text-[10px] font-bold tracking-wider text-slate-500 uppercase flex items-center justify-between">
-            <span>BATCH</span>
-            <Icon name="calendar" size={13} className="text-slate-400" />
+        {/* 1: ACADEMIC YEAR (Context-aware: Regular vs Re-Exam) */}
+        {context?.examCycle === "Re-Exam" ? (
+          <div className="bg-amber-50/60 dark:bg-amber-950/20 p-2.5 rounded-xl border border-amber-200 dark:border-amber-900/60 shadow-sm flex flex-col justify-between">
+            <div className="text-[10px] font-bold tracking-wider text-amber-800 dark:text-amber-300 uppercase flex items-center justify-between">
+              <span>ACAD. YEAR & BATCHES</span>
+              <Icon name="calendar" size={13} className="text-amber-500" />
+            </div>
+            <div className="mt-1 space-y-1">
+              <div className="text-sm font-bold text-slate-900 dark:text-white leading-tight">
+                {metrics.batch || context.batch || "2025-26"}
+              </div>
+              <input
+                type="text"
+                value={metrics.appearingBatches ?? ""}
+                onChange={(e) => onUpdateMetrics({ ...metrics, appearingBatches: e.target.value })}
+                placeholder="Curr + Prev Yr Batches"
+                className="w-full px-1.5 py-0.5 text-[11px] font-medium text-slate-800 dark:text-slate-200 bg-white dark:bg-slate-900 rounded border border-amber-300 dark:border-amber-800 focus:outline-none focus:ring-1 focus:ring-amber-500 truncate"
+                title="Appearing Batches (e.g. 2025-26 & Prior Batches)"
+              />
+            </div>
+            <div className="text-[9px] text-amber-700 dark:text-amber-400 font-medium truncate mt-0.5">
+              Exam Year &amp; Cohorts
+            </div>
           </div>
-          <div className="text-base font-bold text-slate-900 dark:text-white mt-1">
-            {metrics.batch || context.batch || "2025-26"}
+        ) : (
+          <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+            <div className="text-[10px] font-bold tracking-wider text-slate-500 uppercase flex items-center justify-between">
+              <span>ACADEMIC YEAR</span>
+              <Icon name="calendar" size={13} className="text-slate-400" />
+            </div>
+            <div className="text-base font-bold text-slate-900 dark:text-white mt-1">
+              {metrics.batch || context.batch || "2025-26"}
+            </div>
+            <div className="text-[10px] text-slate-400">Regular Batch Session</div>
           </div>
-          <div className="text-[10px] text-slate-400">Academic Year</div>
-        </div>
+        )}
 
         {/* 2: EXAM MONTH & YEAR (Auto + Manual Edit) */}
         <div className="bg-indigo-50/70 dark:bg-indigo-950/30 p-2.5 rounded-xl border border-indigo-200 dark:border-indigo-900/60 shadow-sm flex flex-col justify-between">
@@ -5610,23 +5762,77 @@ function HeaderMetricsCards({
           <div className="text-[10px] text-slate-400">Active Papers</div>
         </div>
 
-        {/* 5: STUDENTS */}
-        <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
-          <div className="text-[10px] font-bold tracking-wider text-slate-500 uppercase flex items-center justify-between">
-            <span>STUDENTS</span>
-            <Icon name="users" size={13} className="text-slate-400" />
+        {/* 5: STUDENTS (Context-aware: Regular vs Re-Exam Cohorts) */}
+        {context?.examCycle === "Re-Exam" ? (
+          <div className="bg-indigo-50/60 dark:bg-indigo-950/30 p-2.5 rounded-xl border border-indigo-200 dark:border-indigo-900/60 shadow-sm flex flex-col justify-between">
+            <div className="text-[10px] font-bold tracking-wider text-indigo-700 dark:text-indigo-300 uppercase flex items-center justify-between">
+              <span>RE-EXAM STUDENTS</span>
+              <Icon name="users" size={13} className="text-indigo-500" />
+            </div>
+            <div className="mt-1 grid grid-cols-2 gap-1.5">
+              <div>
+                <label className="text-[9px] font-semibold text-slate-500 block truncate">Reg Batch:</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={metrics.regBatchStudents ?? 0}
+                  onChange={(e) => {
+                    const reg = parseInt(e.target.value, 10);
+                    const validReg = isNaN(reg) ? 0 : reg;
+                    const prev = metrics.prevBatchStudents ?? 0;
+                    onUpdateMetrics({
+                      ...metrics,
+                      regBatchStudents: validReg,
+                      totalStudents: validReg + prev
+                    });
+                  }}
+                  className="w-full px-1 py-0.5 text-xs font-bold text-slate-900 dark:text-white bg-white dark:bg-slate-900 rounded border border-indigo-200 dark:border-indigo-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  title="Current Regular Batch Students Appearing for Re-Exam"
+                />
+              </div>
+              <div>
+                <label className="text-[9px] font-semibold text-slate-500 block truncate">Prev Yr (Ex):</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={metrics.prevBatchStudents ?? 0}
+                  onChange={(e) => {
+                    const prev = parseInt(e.target.value, 10);
+                    const validPrev = isNaN(prev) ? 0 : prev;
+                    const reg = metrics.regBatchStudents ?? 0;
+                    onUpdateMetrics({
+                      ...metrics,
+                      prevBatchStudents: validPrev,
+                      totalStudents: reg + validPrev
+                    });
+                  }}
+                  className="w-full px-1 py-0.5 text-xs font-bold text-slate-900 dark:text-white bg-white dark:bg-slate-900 rounded border border-indigo-200 dark:border-indigo-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  title="Previous Academic Years Repeater / Backlog Students"
+                />
+              </div>
+            </div>
+            <div className="text-[10px] font-bold text-indigo-700 dark:text-indigo-300 mt-1 truncate">
+              Total Appearing: {metrics.totalStudents ?? ((metrics.regBatchStudents || 0) + (metrics.prevBatchStudents || 0))}
+            </div>
           </div>
-          <div className="mt-1">
-            <input
-              type="number"
-              min="0"
-              value={metrics.totalStudents ?? 480}
-              onChange={(e) => handleChange('totalStudents', e.target.value)}
-              className="w-20 px-1.5 py-0.5 text-base font-bold text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-800 rounded border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            />
+        ) : (
+          <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+            <div className="text-[10px] font-bold tracking-wider text-slate-500 uppercase flex items-center justify-between">
+              <span>STUDENTS</span>
+              <Icon name="users" size={13} className="text-slate-400" />
+            </div>
+            <div className="mt-1">
+              <input
+                type="number"
+                min="0"
+                value={metrics.totalStudents ?? 480}
+                onChange={(e) => handleChange('totalStudents', e.target.value)}
+                className="w-20 px-1.5 py-0.5 text-base font-bold text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-800 rounded border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="text-[10px] text-slate-400">Regular Enrolment</div>
           </div>
-          <div className="text-[10px] text-slate-400">Registered Count</div>
-        </div>
+        )}
 
         {/* 6: PWD */}
         <div className="bg-purple-50/70 dark:bg-purple-950/30 p-2.5 rounded-xl border border-purple-200 dark:border-purple-900/60 shadow-sm flex flex-col justify-between">
@@ -5710,18 +5916,30 @@ function ActivityTrackerView({
   const [collapsedPhases, setCollapsedPhases] = useState({});
   const [selectedIds, setSelectedIds] = useState([]);
 
-  // Group activities by phase (respects config.phases order with fallback)
+  // Filter activities applicable to currently selected examCycle (Regular vs Re-Exam)
+  const cycleApplicableActivities = useMemo(() => {
+    return activities.filter(act => isActivityApplicableForCycle(act, context.examCycle));
+  }, [activities, context.examCycle]);
+
+  // Group activities by phase (respects config.phases order with fallback and auto-hides phases with 0 applicable activities)
   const phases = useMemo(() => {
     const list = config?.phases && config.phases.length > 0 ? [...config.phases] : [...INITIAL_PHASES];
-    activities.forEach(a => {
+    cycleApplicableActivities.forEach(a => {
       if (a.phase && !list.includes(a.phase)) list.push(a.phase);
     });
-    return list;
-  }, [activities, config?.phases]);
+    return list.filter(p => cycleApplicableActivities.some(a => a.phase === p));
+  }, [cycleApplicableActivities, config?.phases]);
 
-  // Filter activities
+  // Reset phaseFilter to ALL if current phaseFilter no longer exists in applicable phases
+  useEffect(() => {
+    if (phaseFilter !== "ALL" && !phases.includes(phaseFilter)) {
+      setPhaseFilter("ALL");
+    }
+  }, [phases, phaseFilter, setPhaseFilter]);
+
+  // Filter activities for active view
   const filteredActivities = useMemo(() => {
-    return activities.filter(act => {
+    return cycleApplicableActivities.filter(act => {
       const log = currentLogs[act.id] || {};
       const status = computeActivityStatus(act, log, context.semester);
 
@@ -5768,9 +5986,9 @@ function ActivityTrackerView({
 
       return true;
     });
-  }, [activities, currentLogs, context.semester, phaseFilter, statusFilter, makerFilter, searchQuery, currentUser]);
+  }, [cycleApplicableActivities, currentLogs, context.semester, phaseFilter, statusFilter, makerFilter, searchQuery, currentUser]);
 
-  // Overall counters
+  // Overall counters (scoped strictly to applicable activities for this cycle)
   const stats = useMemo(() => {
     let completed = 0;
     let inProgress = 0;
@@ -5778,7 +5996,7 @@ function ActivityTrackerView({
     let queryRaised = 0;
     let na = 0;
 
-    activities.forEach(act => {
+    cycleApplicableActivities.forEach(act => {
       const log = currentLogs[act.id] || {};
       const s = computeActivityStatus(act, log, context.semester);
       if (s === "COMPLETED") completed++;
@@ -5788,10 +6006,10 @@ function ActivityTrackerView({
       else pending++;
     });
 
-    const activeTotal = activities.length - na;
+    const activeTotal = cycleApplicableActivities.length - na;
     const pct = activeTotal > 0 ? Math.round((completed / activeTotal) * 100) : 0;
-    return { completed, inProgress, pending, queryRaised, na, pct };
-  }, [activities, currentLogs, context.semester]);
+    return { completed, inProgress, pending, queryRaised, na, pct, total: cycleApplicableActivities.length };
+  }, [cycleApplicableActivities, currentLogs, context.semester]);
 
   // Toggle Collapse
   const togglePhase = (phase) => {
@@ -6054,7 +6272,7 @@ function ActivityTrackerView({
               onChange={(e) => setPhaseFilter(e.target.value)}
               className="bg-transparent font-bold text-slate-900 dark:text-white focus:outline-none cursor-pointer max-w-[200px] truncate"
             >
-              <option value="ALL" className="dark:bg-slate-900">All 7 Phases</option>
+              <option value="ALL" className="dark:bg-slate-900">{phases.length === 7 ? "All 7 Phases" : `All ${phases.length} Phases`}</option>
               {phases.map(p => (
                 <option key={p} value={p} className="dark:bg-slate-900">{p}</option>
               ))}
@@ -6902,14 +7120,32 @@ function MyActionQueueView({
   );
 }
 
-// --- Executive Dashboard & RAG Heatmap ---
+// --- Executive Dashboard & Detailed Reports ---
 function ExecutiveDashboardView({
   activities,
-  contexts,
+  contexts = {},
   config,
-  onNavigateToContextPhase
+  onNavigateToContextPhase,
+  onNavigateToContext
 }) {
-  const phases = useMemo(() => {
+  const [dashBatch, setDashBatch] = useState(() => config.currentBatch || "ALL");
+  const [dashCollege, setDashCollege] = useState("ALL");
+  const [dashCycle, setDashCycle] = useState("ALL");
+  const [dashSem, setDashSem] = useState("ALL");
+  const [tableSearch, setTableSearch] = useState("");
+  const [sortField, setSortField] = useState("college");
+  const [sortAsc, setSortAsc] = useState(true);
+
+  // Reset Filters
+  const handleResetFilters = () => {
+    setDashBatch(config.currentBatch || "ALL");
+    setDashCollege("ALL");
+    setDashCycle("ALL");
+    setDashSem("ALL");
+    setTableSearch("");
+  };
+
+  const allPhases = useMemo(() => {
     const list = config?.phases && config.phases.length > 0 ? [...config.phases] : [...INITIAL_PHASES];
     activities.forEach(a => {
       if (a.phase && !list.includes(a.phase)) list.push(a.phase);
@@ -6917,9 +7153,86 @@ function ExecutiveDashboardView({
     return list;
   }, [activities, config?.phases]);
 
-  // Aggregate metrics across all saved contexts
+  // Hide phase columns in RAG matrix that do not apply to dashCycle
+  const visiblePhases = useMemo(() => {
+    return allPhases.filter(ph => {
+      return activities.some(act => act.phase === ph && (dashCycle === "ALL" || isActivityApplicableForCycle(act, dashCycle)));
+    });
+  }, [allPhases, activities, dashCycle]);
+
+  // Session records matching active dashboard filters
+  const sessionRecords = useMemo(() => {
+    const list = [];
+    Object.entries(contexts || {}).forEach(([ctxKey, ctxData]) => {
+      const parts = ctxKey.split('__');
+      if (parts.length < 5) return;
+      const [colId, batch, progId, sem, cycle] = parts;
+
+      if (dashBatch !== "ALL" && batch !== dashBatch) return;
+      if (dashCollege !== "ALL" && colId !== dashCollege) return;
+      if (dashCycle !== "ALL" && cycle !== dashCycle) return;
+      if (dashSem !== "ALL") {
+        if (dashSem === "ODD" && !["Sem I", "Sem III", "Sem V", "Sem VII"].includes(sem)) return;
+        else if (dashSem === "EVEN" && !["Sem II", "Sem IV", "Sem VI", "Sem VIII"].includes(sem)) return;
+        else if (dashSem !== "ODD" && dashSem !== "EVEN" && sem !== dashSem) return;
+      }
+
+      const m = ctxData?.headerMetrics || {};
+      const logs = ctxData?.logs || {};
+      const collegeObj = (config?.colleges || []).find(c => c.id === colId);
+      const collegeName = collegeObj ? collegeObj.name : colId;
+
+      let applicableCount = 0;
+      let completedCount = 0;
+      let sessionQueries = 0;
+
+      activities.forEach(act => {
+        if (!isActivityApplicableForCycle(act, cycle)) return;
+        const log = logs[act.id] || {};
+        const status = computeActivityStatus(act, log, sem);
+        if (status === "SKIPPED" || status === "NA" || log.isNA) return;
+
+        applicableCount++;
+        if (log.queryDetails && !log.queryDetails.resolved) sessionQueries++;
+        if (status === "COMPLETED") completedCount++;
+      });
+
+      const progressPct = applicableCount > 0 ? Math.round((completedCount / applicableCount) * 100) : 0;
+      const autoMonth = formatExamMonthYear(logs["act_135"]?.performedDate || logs["act_23"]?.performedDate);
+      const examMonthYear = m.examMonthYear || autoMonth || "";
+
+      list.push({
+        ctxKey,
+        college: colId,
+        collegeName,
+        batch,
+        program: progId,
+        semester: sem,
+        examCycle: cycle,
+        examMonthYear,
+        totalStudents: m.totalStudents ?? (cycle === "Re-Exam" ? ((m.regBatchStudents || 0) + (m.prevBatchStudents || 0)) : 480),
+        regBatchStudents: m.regBatchStudents || 0,
+        prevBatchStudents: m.prevBatchStudents || 0,
+        appearingBatches: m.appearingBatches || "",
+        pwdStudents: m.pwdStudents || 0,
+        debarredStudents: m.debarredStudents || 0,
+        ufmCases: m.ufmCases || 0,
+        numModules: m.numModules || 0,
+        applicableTasks: applicableCount,
+        completedTasks: completedCount,
+        progressPct,
+        queries: sessionQueries,
+        logs
+      });
+    });
+    return list;
+  }, [contexts, activities, config, dashBatch, dashCollege, dashCycle, dashSem]);
+
+  // Aggregate KPI summary for filtered sessions
   const summary = useMemo(() => {
     let totalStudents = 0;
+    let totalRegStudents = 0;
+    let totalPrevStudents = 0;
     let totalPwd = 0;
     let totalDebarred = 0;
     let totalUfm = 0;
@@ -6927,67 +7240,70 @@ function ExecutiveDashboardView({
     let totalCompleted = 0;
     let totalActiveTasks = 0;
 
-    Object.values(contexts).forEach(ctx => {
-      const m = ctx.headerMetrics || {};
-      totalStudents += (m.totalStudents || 0);
-      totalPwd += (m.pwdStudents || 0);
-      totalDebarred += (m.debarredStudents || 0);
-      totalUfm += (m.ufmCases || 0);
-
-      const logs = ctx.logs || {};
-      activities.forEach(act => {
-        const log = logs[act.id];
-        if (log && !log.isNA) {
-          totalActiveTasks++;
-          if (log.queryDetails && !log.queryDetails.resolved) totalQueries++;
-          const mRank = ROLE_RANKS[act.performedBy] ?? -1;
-          const vReqs = (act.requiredVerifiers || []).filter(r => (ROLE_RANKS[r] ?? -1) > mRank);
-          const allV = vReqs.length === 0 || vReqs.every(r => log.verifications?.[r]?.verified);
-          if (log.performedDate && allV) totalCompleted++;
-        }
-      });
+    sessionRecords.forEach(s => {
+      totalStudents += s.totalStudents;
+      totalRegStudents += s.regBatchStudents;
+      totalPrevStudents += s.prevBatchStudents;
+      totalPwd += s.pwdStudents;
+      totalDebarred += s.debarredStudents;
+      totalUfm += s.ufmCases;
+      totalQueries += s.queries;
+      totalCompleted += s.completedTasks;
+      totalActiveTasks += s.applicableTasks;
     });
 
     const overallPct = totalActiveTasks > 0 ? Math.round((totalCompleted / totalActiveTasks) * 100) : 0;
-    return { totalStudents, totalPwd, totalDebarred, totalUfm, totalQueries, totalCompleted, totalActiveTasks, overallPct };
-  }, [activities, contexts]);
+    return {
+      totalStudents,
+      totalRegStudents,
+      totalPrevStudents,
+      totalPwd,
+      totalDebarred,
+      totalUfm,
+      totalQueries,
+      totalCompleted,
+      totalActiveTasks,
+      overallPct
+    };
+  }, [sessionRecords]);
 
-  // Heatmap matrix: College x Phase
+  // Filtered heatmap data
   const heatmapData = useMemo(() => {
+    const collegesList = dashCollege === "ALL" 
+      ? config.colleges 
+      : config.colleges.filter(c => c.id === dashCollege);
+
     const matrix = {};
-    config.colleges.forEach(col => {
+    collegesList.forEach(col => {
       matrix[col.id] = { college: col, phaseStats: {}, overall: { completed: 0, total: 0, pct: 0 } };
-      phases.forEach(ph => {
+      visiblePhases.forEach(ph => {
         matrix[col.id].phaseStats[ph] = { completed: 0, total: 0, pct: 0 };
       });
     });
 
-    // Populate from contexts
-    Object.entries(contexts).forEach(([ctxKey, ctxData]) => {
-      const colId = ctxKey.split('__')[0];
+    sessionRecords.forEach(s => {
+      const colId = s.college;
       if (!matrix[colId]) return;
 
-      const logs = ctxData.logs || {};
       activities.forEach(act => {
-        const log = logs[act.id] || {};
-        if (log.isNA) return;
+        if (!isActivityApplicableForCycle(act, s.examCycle)) return;
+        if (!visiblePhases.includes(act.phase)) return;
+        const log = s.logs[act.id] || {};
+        const status = computeActivityStatus(act, log, s.semester);
+        if (status === "SKIPPED" || status === "NA" || log.isNA) return;
 
         matrix[colId].phaseStats[act.phase].total++;
         matrix[colId].overall.total++;
 
-        const mRank2 = ROLE_RANKS[act.performedBy] ?? -1;
-        const vReqs2 = (act.requiredVerifiers || []).filter(r => (ROLE_RANKS[r] ?? -1) > mRank2);
-        const allV = vReqs2.length === 0 || vReqs2.every(r => log.verifications?.[r]?.verified);
-        if (log.performedDate && allV) {
+        if (status === "COMPLETED") {
           matrix[colId].phaseStats[act.phase].completed++;
           matrix[colId].overall.completed++;
         }
       });
     });
 
-    // Calculate percentages
     Object.values(matrix).forEach(row => {
-      phases.forEach(ph => {
+      visiblePhases.forEach(ph => {
         const st = row.phaseStats[ph];
         st.pct = st.total > 0 ? Math.round((st.completed / st.total) * 100) : 0;
       });
@@ -6995,16 +7311,19 @@ function ExecutiveDashboardView({
     });
 
     return matrix;
-  }, [activities, contexts, config.colleges, phases]);
+  }, [config.colleges, dashCollege, visiblePhases, sessionRecords, activities]);
 
-  // Top Bottlenecks
+  // Filtered bottlenecks
   const bottlenecks = useMemo(() => {
     const counts = {};
-    Object.values(contexts).forEach(ctx => {
-      const logs = ctx.logs || {};
+    sessionRecords.forEach(s => {
       activities.forEach(act => {
-        const log = logs[act.id] || {};
+        if (!isActivityApplicableForCycle(act, s.examCycle)) return;
+        const log = s.logs[act.id] || {};
         if (log.isNA) return;
+        const status = computeActivityStatus(act, log, s.semester);
+        if (status === "SKIPPED") return;
+
         const isQ = log.queryDetails && !log.queryDetails.resolved;
         const reqs = (act.requiredVerifiers || []).filter(r => (ROLE_RANKS[r] ?? -1) > (ROLE_RANKS[act.performedBy] ?? -1));
         const isPendingVerif = log.performedDate && !reqs.every(r => log.verifications?.[r]?.verified);
@@ -7022,7 +7341,54 @@ function ExecutiveDashboardView({
     return Object.values(counts)
       .sort((a, b) => (b.queries * 2 + b.pendingVerifs) - (a.queries * 2 + a.pendingVerifs))
       .slice(0, 6);
-  }, [activities, contexts]);
+  }, [sessionRecords, activities]);
+
+  // Filtered and sorted table sessions
+  const filteredAndSortedSessions = useMemo(() => {
+    let result = sessionRecords.filter(s => {
+      if (!tableSearch.trim()) return true;
+      const q = tableSearch.toLowerCase().trim();
+      return (
+        s.program.toLowerCase().includes(q) ||
+        s.collegeName.toLowerCase().includes(q) ||
+        s.college.toLowerCase().includes(q) ||
+        s.examMonthYear.toLowerCase().includes(q) ||
+        s.batch.toLowerCase().includes(q) ||
+        s.semester.toLowerCase().includes(q)
+      );
+    });
+
+    result.sort((a, b) => {
+      let vA = a[sortField];
+      let vB = b[sortField];
+      if (typeof vA === 'string') {
+        vA = vA.toLowerCase();
+        vB = (vB || '').toLowerCase();
+        return sortAsc ? vA.localeCompare(vB) : vB.localeCompare(vA);
+      }
+      return sortAsc ? ((vA ?? 0) - (vB ?? 0)) : ((vB ?? 0) - (vA ?? 0));
+    });
+
+    return result;
+  }, [sessionRecords, tableSearch, sortField, sortAsc]);
+
+  const handleSort = (field) => {
+    if (sortField === field) {
+      setSortAsc(!sortAsc);
+    } else {
+      setSortField(field);
+      setSortAsc(true);
+    }
+  };
+
+  const handleExportFiltered = () => {
+    exportExecutiveDashboardExcel(
+      filteredAndSortedSessions,
+      summary,
+      { batch: dashBatch, college: dashCollege, cycle: dashCycle, sem: dashSem },
+      config
+    );
+  };
 
   return (
     <div className="max-w-[1700px] mx-auto px-4 py-4 space-y-4 pb-24">
@@ -7031,22 +7397,113 @@ function ExecutiveDashboardView({
         <div>
           <h1 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
             <Icon name="bar-chart-3" size={22} className="text-indigo-600 dark:text-indigo-400" />
-            <span>Executive Dashboard & RAG Progress Heatmap</span>
+            <span>Executive Dashboard &amp; Multi-College Examination Reports</span>
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Cross-College, Multi-Phase Examination Verification Matrix & Integrity Overview
+            Cross-College, Academic Year-Wise &amp; Exam-Wise Verification Status, KPIs &amp; Audit Oversight
           </p>
         </div>
       </div>
 
-      {/* KPI Cards Row */}
+      {/* Executive Filter & Export Toolbar */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-wrap items-center justify-between gap-3 text-xs no-print">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Academic Year Filter */}
+          <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+            <Icon name="calendar" size={14} className="text-indigo-600 dark:text-indigo-400" />
+            <span className="font-semibold text-slate-500">Acad. Year:</span>
+            <select
+              value={dashBatch}
+              onChange={(e) => setDashBatch(e.target.value)}
+              className="bg-transparent font-bold text-slate-900 dark:text-white focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="dark:bg-slate-900">All Academic Years</option>
+              {config.batches.map(b => (
+                <option key={b} value={b} className="dark:bg-slate-900">{b}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* College Filter */}
+          <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+            <Icon name="building" size={14} className="text-indigo-600 dark:text-indigo-400" />
+            <span className="font-semibold text-slate-500">College:</span>
+            <select
+              value={dashCollege}
+              onChange={(e) => setDashCollege(e.target.value)}
+              className="bg-transparent font-bold text-slate-900 dark:text-white focus:outline-none cursor-pointer max-w-[200px] truncate"
+            >
+              <option value="ALL" className="dark:bg-slate-900">All Colleges</option>
+              {config.colleges.map(c => (
+                <option key={c.id} value={c.id} className="dark:bg-slate-900">{c.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Exam Cycle Filter */}
+          <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+            <Icon name="layers" size={14} className="text-indigo-600 dark:text-indigo-400" />
+            <span className="font-semibold text-slate-500">Exam Cycle:</span>
+            <select
+              value={dashCycle}
+              onChange={(e) => setDashCycle(e.target.value)}
+              className="bg-transparent font-bold text-slate-900 dark:text-white focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="dark:bg-slate-900">All Cycles</option>
+              <option value="Regular" className="dark:bg-slate-900">Regular</option>
+              <option value="Re-Exam" className="dark:bg-slate-900">Re-Exam</option>
+            </select>
+          </div>
+
+          {/* Semester Filter */}
+          <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+            <span className="font-semibold text-slate-500">Sem:</span>
+            <select
+              value={dashSem}
+              onChange={(e) => setDashSem(e.target.value)}
+              className="bg-transparent font-bold text-slate-900 dark:text-white focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="dark:bg-slate-900">All Semesters</option>
+              <option value="ODD" className="dark:bg-slate-900">Odd Semesters (I, III, V, VII)</option>
+              <option value="EVEN" className="dark:bg-slate-900">Even Semesters (II, IV, VI, VIII)</option>
+              {config.semesters.map(s => (
+                <option key={s} value={s} className="dark:bg-slate-900">{s}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Reset Filters Button */}
+          <button
+            onClick={handleResetFilters}
+            className="px-2.5 py-1.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl font-semibold flex items-center gap-1 border border-slate-200 dark:border-slate-700 transition"
+            title="Reset All Filters to Default"
+          >
+            <Icon name="refresh-cw" size={13} />
+            <span>Reset</span>
+          </button>
+        </div>
+
+        {/* Export Excel Button */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExportFiltered}
+            className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold shadow flex items-center gap-1.5 transition text-xs"
+            title="Export Filtered Executive Dashboard & Session Reports to Excel (.xlsx)"
+          >
+            <Icon name="download" size={14} />
+            <span>Export Filtered Report (.xlsx)</span>
+          </button>
+        </div>
+      </div>
+
+      {/* KPI Cards Row (Filtered) */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
           <div className="text-[10px] font-bold text-slate-400 uppercase">Overall Compliance</div>
           <div className="text-xl font-bold text-indigo-600 dark:text-indigo-400 mt-1">
             {summary.overallPct}%
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">{summary.totalCompleted} Completed Tasks</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{summary.totalCompleted} / {summary.totalActiveTasks} Tasks</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
@@ -7062,7 +7519,11 @@ function ExecutiveDashboardView({
           <div className="text-xl font-bold text-slate-900 dark:text-white mt-1">
             {summary.totalStudents}
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Across Colleges</div>
+          <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+            {dashCycle === "Re-Exam" || summary.totalRegStudents > 0
+              ? `Reg: ${summary.totalRegStudents} | Prev: ${summary.totalPrevStudents}`
+              : "Across Filtered Sessions"}
+          </div>
         </div>
 
         <div className="bg-purple-50/60 dark:bg-purple-950/20 p-3.5 rounded-2xl border border-purple-200 dark:border-purple-900/60 shadow-sm">
@@ -7092,11 +7553,11 @@ function ExecutiveDashboardView({
 
       {/* Cross-College & Cross-Phase RAG Heatmap Table */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden p-4">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <span>Phase-by-Phase College RAG Progress Matrix</span>
-              <span className="text-[10px] font-normal text-slate-400">(Click any cell to filter Activity Tracker)</span>
+              <span className="text-[10px] font-normal text-slate-400">({visiblePhases.length} Applicable Phases Shown)</span>
             </h3>
           </div>
           <div className="flex items-center gap-2 text-[10px]">
@@ -7111,16 +7572,20 @@ function ExecutiveDashboardView({
             <thead>
               <tr className="bg-slate-100/70 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 font-bold uppercase text-[10px]">
                 <th className="py-2.5 px-3 text-left">College</th>
-                {phases.map((ph, idx) => (
-                  <th key={ph} className="py-2.5 px-2 max-w-[120px] truncate" title={ph}>
-                    P{idx + 1}: {ph.split(':')[1] || ph}
-                  </th>
-                ))}
+                {visiblePhases.map((ph) => {
+                  const pNum = ph.split(':')[0] || ph;
+                  const pLabel = ph.split(':')[1] || ph;
+                  return (
+                    <th key={ph} className="py-2.5 px-2 max-w-[130px] truncate" title={ph}>
+                      {pNum}: {pLabel}
+                    </th>
+                  );
+                })}
                 <th className="py-2.5 px-3 bg-indigo-50/50 dark:bg-indigo-950/30">Overall %</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {config.colleges.map(col => {
+              {(dashCollege === "ALL" ? config.colleges : config.colleges.filter(c => c.id === dashCollege)).map(col => {
                 const row = heatmapData[col.id] || { phaseStats: {}, overall: { pct: 0 } };
                 return (
                   <tr key={col.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition">
@@ -7128,7 +7593,7 @@ function ExecutiveDashboardView({
                       {col.name}
                     </td>
 
-                    {phases.map(ph => {
+                    {visiblePhases.map(ph => {
                       const st = row.phaseStats[ph] || { completed: 0, total: 0, pct: 0 };
                       let cellClass = "bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900/60";
                       if (st.pct >= 80) {
@@ -7141,7 +7606,7 @@ function ExecutiveDashboardView({
                         <td key={ph} className="py-2.5 px-1.5">
                           <button
                             type="button"
-                            onClick={() => onNavigateToContextPhase(col.id, ph)}
+                            onClick={() => onNavigateToContextPhase && onNavigateToContextPhase(col.id, ph)}
                             className={`w-full py-1.5 px-1 rounded-xl font-bold border transition text-[11px] shadow-sm hover:scale-[1.03] ${cellClass}`}
                             title={`Click to jump to ${col.name} - ${ph}`}
                           >
@@ -7166,14 +7631,179 @@ function ExecutiveDashboardView({
         </div>
       </div>
 
+      {/* NEW SECTION: Academic Year, College & Exam-Wise Detailed Status Report */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Icon name="file-text" size={16} className="text-indigo-600 dark:text-indigo-400" />
+              <span>Academic Year, College &amp; Exam-Wise Detailed Status Report</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Showing {filteredAndSortedSessions.length} active examination session(s) matching selected filters
+            </p>
+          </div>
+
+          {/* Quick Search */}
+          <div className="relative">
+            <input
+              type="text"
+              value={tableSearch}
+              onChange={(e) => setTableSearch(e.target.value)}
+              placeholder="Search program, college or month..."
+              className="w-64 pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+            />
+            <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-slate-400">
+              <Icon name="search" size={14} />
+            </div>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto max-h-[500px] overflow-y-auto border border-slate-100 dark:border-slate-800 rounded-xl">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead className="sticky top-0 bg-slate-100 dark:bg-slate-800 z-10">
+              <tr className="text-slate-500 font-semibold border-b border-slate-200 dark:border-slate-700 uppercase text-[10px]">
+                <th onClick={() => handleSort('batch')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600">
+                  Acad. Year {sortField === 'batch' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('college')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600">
+                  College {sortField === 'college' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('program')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600">
+                  Program {sortField === 'program' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('semester')} className="py-2.5 px-2 cursor-pointer hover:text-indigo-600 text-center">
+                  Sem {sortField === 'semester' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('examCycle')} className="py-2.5 px-2 cursor-pointer hover:text-indigo-600 text-center">
+                  Cycle {sortField === 'examCycle' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('examMonthYear')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600">
+                  Exam Month &amp; Year {sortField === 'examMonthYear' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('totalStudents')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600">
+                  Students {sortField === 'totalStudents' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th className="py-2.5 px-3">PWD / Debar / UFM</th>
+                <th onClick={() => handleSort('progressPct')} className="py-2.5 px-3 cursor-pointer hover:text-indigo-600 min-w-[130px]">
+                  Progress {sortField === 'progressPct' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th onClick={() => handleSort('queries')} className="py-2.5 px-2 cursor-pointer hover:text-indigo-600 text-center">
+                  Queries {sortField === 'queries' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th className="py-2.5 px-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredAndSortedSessions.length === 0 ? (
+                <tr>
+                  <td colSpan="11" className="py-12 text-center text-slate-400">
+                    No examination sessions match the active filters.
+                  </td>
+                </tr>
+              ) : (
+                filteredAndSortedSessions.map(s => {
+                  const ragColor = s.progressPct >= 80 
+                    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" 
+                    : s.progressPct >= 40 
+                    ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" 
+                    : "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300";
+
+                  return (
+                    <tr key={s.ctxKey} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition">
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white font-mono">{s.batch}</td>
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white">
+                        {s.collegeName}
+                        <span className="text-[10px] text-slate-400 ml-1 font-mono">({s.college})</span>
+                      </td>
+                      <td className="py-2.5 px-3 font-bold text-indigo-900 dark:text-indigo-300">{s.program}</td>
+                      <td className="py-2.5 px-2 text-center font-bold">{s.semester}</td>
+                      <td className="py-2.5 px-2 text-center">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          s.examCycle === "Re-Exam" 
+                            ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" 
+                            : "bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
+                        }`}>
+                          {s.examCycle}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300 font-medium">
+                        {s.examMonthYear || "—"}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="font-bold text-slate-900 dark:text-white">{s.totalStudents}</span>
+                        {s.examCycle === "Re-Exam" && (
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            (Reg: {s.regBatchStudents} | Prev: {s.prevBatchStudents})
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                          <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 font-semibold" title="PWD Students">
+                            PWD: {s.pwdStudents}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 font-semibold" title="Debarred Students">
+                            Debar: {s.debarredStudents}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-semibold" title="UFM Pending Cases">
+                            UFM: {s.ufmCases}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-indigo-600 rounded-full transition-all"
+                              style={{ width: `${s.progressPct}%` }}
+                            />
+                          </div>
+                          <span className={`px-1.5 py-0.2 rounded font-mono font-bold text-[10px] ${ragColor}`}>
+                            {s.progressPct}%
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-0.5">
+                          {s.completedTasks} / {s.applicableTasks} Tasks
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 text-center">
+                        {s.queries > 0 ? (
+                          <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 font-bold">
+                            ⚠️ {s.queries}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 font-mono">0</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => onNavigateToContext && onNavigateToContext(s.college, s.batch, s.program, s.semester, s.examCycle)}
+                          className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:hover:bg-indigo-900 dark:text-indigo-300 rounded-lg font-semibold flex items-center gap-1 border border-indigo-200 dark:border-indigo-800 transition shadow-sm ml-auto text-xs"
+                          title="Open this Session in Activity Tracker"
+                        >
+                          <Icon name="external-link" size={12} />
+                          <span>Open Workspace</span>
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Top Pending Bottlenecks */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-4">
         <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-2">
           <Icon name="alert-triangle" size={16} className="text-amber-500" />
-          <span>Top Verification Bottlenecks & Queries Requiring Action</span>
+          <span>Top Verification Bottlenecks &amp; Queries Requiring Action</span>
         </h3>
         {bottlenecks.length === 0 ? (
-          <div className="text-xs text-slate-400 py-4 text-center">No active verification bottlenecks found.</div>
+          <div className="text-xs text-slate-400 py-4 text-center">No active verification bottlenecks found in filtered sessions.</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
             {bottlenecks.map(b => (
@@ -7260,6 +7890,7 @@ function AdminPanel({
   // Activity Master State
   const [actSearch, setActSearch] = useState("");
   const [actPhaseFilter, setActPhaseFilter] = useState("ALL");
+  const [actScopeFilter, setActScopeFilter] = useState("ALL");
   const [editingAct, setEditingAct] = useState(null);
   const [isAddingAct, setIsAddingAct] = useState(false);
 
@@ -7284,6 +7915,10 @@ function AdminPanel({
     return activities
       .filter(a => {
         if (actPhaseFilter !== "ALL" && a.phase !== actPhaseFilter) return false;
+        if (actScopeFilter !== "ALL") {
+          const sc = getActivityExamScope(a);
+          if (sc !== actScopeFilter) return false;
+        }
         if (actSearch.trim()) {
           const q = actSearch.toLowerCase().trim();
           return a.name.toLowerCase().includes(q) || String(a.srNo).includes(q);
@@ -7291,7 +7926,7 @@ function AdminPanel({
         return true;
       })
       .sort((a, b) => (a.srNo || 0) - (b.srNo || 0));
-  }, [activities, actPhaseFilter, actSearch]);
+  }, [activities, actPhaseFilter, actScopeFilter, actSearch]);
 
   const phases = useMemo(() => {
     const list = [];
@@ -7490,6 +8125,17 @@ function AdminPanel({
                   <option key={p} value={p}>{p}</option>
                 ))}
               </select>
+
+              <select
+                value={actScopeFilter}
+                onChange={(e) => setActScopeFilter(e.target.value)}
+                className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-medium"
+              >
+                <option value="ALL">All Exam Scopes</option>
+                <option value="REGULAR_ONLY">Regular Exam Only</option>
+                <option value="REEXAM_ONLY">Re-Exam Only</option>
+                <option value="BOTH">Both (Regular &amp; Re-Exam)</option>
+              </select>
             </div>
 
             <button
@@ -7508,6 +8154,7 @@ function AdminPanel({
                   <th className="py-2.5 px-2 w-12 text-center">#</th>
                   <th className="py-2.5 px-3 min-w-[260px]">Activity Name</th>
                   <th className="py-2.5 px-3">Phase</th>
+                  <th className="py-2.5 px-3 min-w-[140px]">Exam Scope</th>
                   <th className="py-2.5 px-2 text-center">Maker</th>
                   <th className="py-2.5 px-2 text-center">Condition</th>
                   <th className="py-2.5 px-3">Required Verifiers</th>
@@ -7515,49 +8162,69 @@ function AdminPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {filteredActs.map(a => (
-                  <tr key={a.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
-                    <td className="py-2 px-2 text-center font-mono font-bold text-slate-500">{a.srNo}</td>
-                    <td className="py-2 px-3 font-semibold text-slate-900 dark:text-white">{a.name}</td>
-                    <td className="py-2 px-3 text-[11px] text-slate-500">{a.phase}</td>
-                    <td className="py-2 px-2 text-center font-bold text-indigo-600 dark:text-indigo-400">{a.performedBy}</td>
-                    <td className="py-2 px-2 text-center">
-                      <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                        {a.cond}
-                      </span>
-                    </td>
-                    <td className="py-2 px-3 text-[11px] text-slate-600 dark:text-slate-300">
-                      {(a.requiredVerifiers || []).join(' → ')}
-                    </td>
-                    <td className="py-2 px-2 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          onClick={() => setEditingAct(a)}
-                          className="p-1 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                          title="Edit Activity"
+                {filteredActs.map(a => {
+                  const scope = getActivityExamScope(a);
+                  const badgeColor = scope === "REGULAR_ONLY"
+                    ? "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-800"
+                    : scope === "REEXAM_ONLY"
+                    ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800"
+                    : "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800";
+                  return (
+                    <tr key={a.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
+                      <td className="py-2 px-2 text-center font-mono font-bold text-slate-500">{a.srNo}</td>
+                      <td className="py-2 px-3 font-semibold text-slate-900 dark:text-white">{a.name}</td>
+                      <td className="py-2 px-3 text-[11px] text-slate-500">{a.phase}</td>
+                      <td className="py-2 px-3">
+                        <select
+                          value={scope}
+                          onChange={(e) => onSaveActivity({ ...a, examScope: e.target.value })}
+                          className={`px-2 py-0.5 text-[11px] font-bold rounded-lg border focus:outline-none cursor-pointer ${badgeColor}`}
+                          title="Change Exam Scope (Regular Only, Re-Exam Only, or Both Cycles)"
                         >
-                          <Icon name="edit-2" size={14} />
-                        </button>
-                        <button
-                          onClick={() => {
-                          showConfirm({
-                            title: "Delete Master Activity",
-                            message: `Are you sure you want to delete Activity #${a.srNo}: "${a.name}"? This removes it permanently from the activity master list.`,
-                            confirmText: "Delete",
-                            cancelText: "Cancel",
-                            type: "danger",
-                            onConfirm: () => onDeleteActivity(a.id)
-                          });
-                        }}
-                          className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                          title="Delete Activity"
-                        >
-                          <Icon name="trash-2" size={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          <option value="REGULAR_ONLY" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Regular Only</option>
+                          <option value="REEXAM_ONLY" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Re-Exam Only</option>
+                          <option value="BOTH" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Both Cycles</option>
+                        </select>
+                      </td>
+                      <td className="py-2 px-2 text-center font-bold text-indigo-600 dark:text-indigo-400">{a.performedBy}</td>
+                      <td className="py-2 px-2 text-center">
+                        <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                          {a.cond}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-[11px] text-slate-600 dark:text-slate-300">
+                        {(a.requiredVerifiers || []).join(' → ')}
+                      </td>
+                      <td className="py-2 px-2 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => setEditingAct(a)}
+                            className="p-1 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                            title="Edit Activity"
+                          >
+                            <Icon name="edit-2" size={14} />
+                          </button>
+                          <button
+                            onClick={() => {
+                            showConfirm({
+                              title: "Delete Master Activity",
+                              message: `Are you sure you want to delete Activity #${a.srNo}: "${a.name}"? This removes it permanently from the activity master list.`,
+                              confirmText: "Delete",
+                              cancelText: "Cancel",
+                              type: "danger",
+                              onConfirm: () => onDeleteActivity(a.id)
+                            });
+                          }}
+                            className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                            title="Delete Activity"
+                          >
+                            <Icon name="trash-2" size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -8560,6 +9227,7 @@ function ActivityFormModal({ activity, phases, activities = [], onClose, onSave 
   const [srNo, setSrNo] = useState(activity?.srNo ?? (activities.length ? (activities.length + 8) : 8));
   const [name, setName] = useState(activity?.name || "");
   const [phase, setPhase] = useState(activity?.phase || (phases && phases.length ? phases[0] : ""));
+  const [examScope, setExamScope] = useState(activity?.examScope || (activity ? getActivityExamScope(activity) : "REGULAR_ONLY"));
   const [performedBy, setPerformedBy] = useState(activity?.performedBy || "ASST");
   const [cond, setCond] = useState(activity?.cond || "ALL");
   const [requiredVerifiers, setRequiredVerifiers] = useState(activity?.requiredVerifiers || ["ASST_COORD", "COORD", "AR", "DY_COE", "COE"]);
@@ -8569,6 +9237,13 @@ function ActivityFormModal({ activity, phases, activities = [], onClose, onSave 
       setRequiredVerifiers(requiredVerifiers.filter(r => r !== role));
     } else {
       setRequiredVerifiers([...requiredVerifiers, role]);
+    }
+  };
+
+  const handlePhaseChange = (p) => {
+    setPhase(p);
+    if (!activity) {
+      setExamScope(getActivityExamScope({ phase: p }));
     }
   };
 
@@ -8583,6 +9258,7 @@ function ActivityFormModal({ activity, phases, activities = [], onClose, onSave 
       srNo: parseInt(srNo, 10) || 999,
       name: name.trim(),
       phase,
+      examScope,
       performedBy,
       cond,
       requiredVerifiers: sanitizedVerifiers
@@ -8625,7 +9301,7 @@ function ActivityFormModal({ activity, phases, activities = [], onClose, onSave 
               <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Phase</label>
               <select
                 value={phase}
-                onChange={(e) => setPhase(e.target.value)}
+                onChange={(e) => handlePhaseChange(e.target.value)}
                 className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border rounded-xl"
               >
                 {(phases || []).map(p => (
@@ -8648,20 +9324,37 @@ function ActivityFormModal({ activity, phases, activities = [], onClose, onSave 
             </div>
           </div>
 
-          <div>
-            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Performed By (Maker Role)
-            </label>
-            <select
-              value={performedBy}
-              onChange={(e) => setPerformedBy(e.target.value)}
-              className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border rounded-xl font-bold"
-            >
-              <option value="ASST">ASST (Assistant)</option>
-              <option value="ASST_COORD">ASST_COORD (Assistant Coordinator)</option>
-              <option value="COORD">COORD (Coordinator)</option>
-              <option value="AR">AR (Assistant Registrar)</option>
-            </select>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                Exam Scope
+              </label>
+              <select
+                value={examScope}
+                onChange={(e) => setExamScope(e.target.value)}
+                className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border rounded-xl font-bold"
+              >
+                <option value="REGULAR_ONLY">Regular Exam Only</option>
+                <option value="REEXAM_ONLY">Re-Exam Only</option>
+                <option value="BOTH">Both (Regular &amp; Re-Exam)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                Performed By (Maker Role)
+              </label>
+              <select
+                value={performedBy}
+                onChange={(e) => setPerformedBy(e.target.value)}
+                className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border rounded-xl font-bold"
+              >
+                <option value="ASST">ASST (Assistant)</option>
+                <option value="ASST_COORD">ASST_COORD (Assistant Coordinator)</option>
+                <option value="COORD">COORD (Coordinator)</option>
+                <option value="AR">AR (Assistant Registrar)</option>
+              </select>
+            </div>
           </div>
 
           <div>
@@ -8719,20 +9412,22 @@ function AuditReportModal({
 }) {
   const [includeFullChecklist, setIncludeFullChecklist] = useState(true);
 
+  // Scoped strictly to activities applicable to this examCycle
+  const cycleActivities = useMemo(() => {
+    return activities.filter(act => isActivityApplicableForCycle(act, context.examCycle));
+  }, [activities, context.examCycle]);
+
   const phases = useMemo(() => {
-    if (config?.phases && config.phases.length > 0) {
-      return config.phases;
-    }
-    const list = [];
-    activities.forEach(a => {
-      if (!list.includes(a.phase)) list.push(a.phase);
+    const list = config?.phases && config.phases.length > 0 ? [...config.phases] : [...INITIAL_PHASES];
+    cycleActivities.forEach(a => {
+      if (a.phase && !list.includes(a.phase)) list.push(a.phase);
     });
-    return list;
-  }, [activities, config?.phases]);
+    return list.filter(p => cycleActivities.some(a => a.phase === p));
+  }, [cycleActivities, config?.phases]);
 
   const phaseBreakdown = useMemo(() => {
     return phases.map(ph => {
-      const acts = activities.filter(a => a.phase === ph);
+      const acts = cycleActivities.filter(a => a.phase === ph);
       let done = 0;
       acts.forEach(a => {
         const log = currentLogs[a.id] || {};
@@ -8741,7 +9436,9 @@ function AuditReportModal({
       const pct = acts.length > 0 ? Math.round((done / acts.length) * 100) : 0;
       return { phase: ph, total: acts.length, done, pct };
     });
-  }, [phases, activities, currentLogs, context.semester]);
+  }, [phases, cycleActivities, currentLogs, context.semester]);
+
+  const isReExam = context.examCycle === "Re-Exam";
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 flex justify-center p-2 sm:p-6 print:p-0 print:bg-white">
@@ -8764,7 +9461,7 @@ function AuditReportModal({
                 onChange={(e) => setIncludeFullChecklist(e.target.checked)}
                 className="rounded text-indigo-600"
               />
-              <span>Include All 230 Activities in Print</span>
+              <span>Include All Applicable ({cycleActivities.length}) Activities in Print</span>
             </label>
           </div>
           <button
@@ -8780,7 +9477,7 @@ function AuditReportModal({
           <div className="text-xs uppercase tracking-widest font-bold">Shri Vile Parle Kelavani Mandal</div>
           <div className="text-lg font-bold uppercase tracking-wider mt-0.5">Controller of Examinations Division (CED)</div>
           <div className="text-sm font-semibold uppercase tracking-wide mt-0.5 underline">
-            Examination Process Compliance & Multi-Tier Audit Verification Certificate
+            Examination Process Compliance &amp; Multi-Tier Audit Verification Certificate
           </div>
         </div>
 
@@ -8789,9 +9486,12 @@ function AuditReportModal({
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">
             <div><strong>College / Institution:</strong> {context.college} College</div>
             <div><strong>Batch (Academic Year):</strong> {context.batch}</div>
-            <div><strong>Exam Month & Year:</strong> {headerMetrics.examMonthYear || (context.examCycle === "Re-Exam" ? (formatExamMonthYear(currentLogs["act_135"]?.performedDate) || formatExamMonthYear(currentLogs["act_23"]?.performedDate)) : (formatExamMonthYear(currentLogs["act_23"]?.performedDate) || formatExamMonthYear(currentLogs["act_135"]?.performedDate))) || "N/A"}</div>
+            {isReExam && (
+              <div><strong>Appearing Batches:</strong> {headerMetrics.appearingBatches || "Current + Prior Batches"}</div>
+            )}
+            <div><strong>Exam Month &amp; Year:</strong> {headerMetrics.examMonthYear || (isReExam ? (formatExamMonthYear(currentLogs["act_135"]?.performedDate) || formatExamMonthYear(currentLogs["act_23"]?.performedDate)) : (formatExamMonthYear(currentLogs["act_23"]?.performedDate) || formatExamMonthYear(currentLogs["act_135"]?.performedDate))) || "N/A"}</div>
             <div><strong>Program / Course:</strong> {context.program}</div>
-            <div><strong>Semester & Cycle:</strong> {context.semester} • {context.examCycle} Examination</div>
+            <div><strong>Semester &amp; Cycle:</strong> {context.semester} • {context.examCycle} Examination</div>
             <div><strong>Audit Inspection Date:</strong> {new Date().toLocaleDateString()} {new Date().toLocaleTimeString()}</div>
             <div><strong>Report Authority:</strong> CED Multi-Tier Compliance Cell</div>
           </div>
@@ -8799,11 +9499,19 @@ function AuditReportModal({
 
         {/* Executive Session Metrics Table */}
         <div className="mb-4">
-          <div className="text-xs font-bold uppercase mb-1">1. Session Summary & Student Integrity Statistics</div>
+          <div className="text-xs font-bold uppercase mb-1">1. Session Summary &amp; Student Integrity Statistics</div>
           <table className="w-full text-xs border border-black border-collapse text-center">
             <thead>
               <tr className="bg-slate-100 border-b border-black font-bold">
-                <th className="border-r border-black p-1.5">Total Registered Students</th>
+                {isReExam ? (
+                  <>
+                    <th className="border-r border-black p-1.5">Total Appearing Students</th>
+                    <th className="border-r border-black p-1.5">Reg Batch Students</th>
+                    <th className="border-r border-black p-1.5">Prev. Year (Ex) Students</th>
+                  </>
+                ) : (
+                  <th className="border-r border-black p-1.5">Total Registered Students</th>
+                )}
                 <th className="border-r border-black p-1.5">PWD Students (Writer / Comp. Time)</th>
                 <th className="border-r border-black p-1.5">Debarred Students</th>
                 <th className="border-r border-black p-1.5">UFM Pending Cases</th>
@@ -8812,7 +9520,15 @@ function AuditReportModal({
             </thead>
             <tbody>
               <tr>
-                <td className="border-r border-black p-2 font-bold">{headerMetrics.totalStudents || 0}</td>
+                {isReExam ? (
+                  <>
+                    <td className="border-r border-black p-2 font-bold">{headerMetrics.totalStudents || ((headerMetrics.regBatchStudents || 0) + (headerMetrics.prevBatchStudents || 0))}</td>
+                    <td className="border-r border-black p-2 font-bold">{headerMetrics.regBatchStudents || 0}</td>
+                    <td className="border-r border-black p-2 font-bold">{headerMetrics.prevBatchStudents || 0}</td>
+                  </>
+                ) : (
+                  <td className="border-r border-black p-2 font-bold">{headerMetrics.totalStudents || 0}</td>
+                )}
                 <td className="border-r border-black p-2 font-bold">{headerMetrics.pwdStudents || 0}</td>
                 <td className="border-r border-black p-2 font-bold">{headerMetrics.debarredStudents || 0}</td>
                 <td className="border-r border-black p-2 font-bold">{headerMetrics.ufmCases || 0}</td>
@@ -8824,19 +9540,19 @@ function AuditReportModal({
 
         {/* Phase-wise Compliance Breakdown Table */}
         <div className="mb-4">
-          <div className="text-xs font-bold uppercase mb-1">2. Phase-by-Phase Process Verification Breakdown</div>
+          <div className="text-xs font-bold uppercase mb-1">2. Phase-by-Phase Process Verification Breakdown ({context.examCycle} Scope)</div>
           <table className="w-full text-xs border border-black border-collapse">
             <thead>
               <tr className="bg-slate-100 border-b border-black font-bold text-center">
                 <th className="border-r border-black p-1.5 text-left">Examination Phase</th>
-                <th className="border-r border-black p-1.5 w-24">Total Tasks</th>
+                <th className="border-r border-black p-1.5 w-24">Applicable Tasks</th>
                 <th className="border-r border-black p-1.5 w-24">Completed</th>
                 <th className="border-r border-black p-1.5 w-24">Compliance %</th>
                 <th className="p-1.5 w-28">Audit Status</th>
               </tr>
             </thead>
             <tbody>
-              {phaseBreakdown.map((pb, idx) => (
+              {phaseBreakdown.map((pb) => (
                 <tr key={pb.phase} className="border-b border-black text-center">
                   <td className="border-r border-black p-1.5 text-left font-semibold">
                     {pb.phase}
@@ -8853,10 +9569,10 @@ function AuditReportModal({
           </table>
         </div>
 
-        {/* Optional Full 230 Activity Checklist */}
+        {/* Optional Applicable Activity Checklist */}
         {includeFullChecklist && (
           <div className="mb-6 page-break-before">
-            <div className="text-xs font-bold uppercase mb-1">3. Detailed Chronological Activity Sign-Off Log (Rows 8 to 237)</div>
+            <div className="text-xs font-bold uppercase mb-1">3. Detailed Chronological Activity Sign-Off Log ({cycleActivities.length} Activities)</div>
             <table className="w-full text-[10px] border border-black border-collapse">
               <thead>
                 <tr className="bg-slate-100 border-b border-black font-bold text-center">
@@ -8869,7 +9585,7 @@ function AuditReportModal({
                 </tr>
               </thead>
               <tbody>
-                {activities.map(act => {
+                {cycleActivities.map(act => {
                   const log = currentLogs[act.id] || {};
                   const status = computeActivityStatus(act, log, context.semester);
                   return (
@@ -8902,13 +9618,13 @@ function AuditReportModal({
         {/* Formal Institutional Sign-Off Block (5 Columns) */}
         <div className="mt-8 pt-4 border-t-2 border-black page-break-inside-avoid">
           <div className="text-center text-xs font-bold uppercase tracking-wider mb-6">
-            Institutional Verification Sign-Off & Approvals
+            Institutional Verification Sign-Off &amp; Approvals
           </div>
           <div className="grid grid-cols-5 gap-2 text-center text-[10px]">
             {/* Assistant */}
             <div className="border border-black p-2 flex flex-col justify-between h-28">
               <div className="font-bold border-b border-black pb-1">Assistant (Exam Cell)</div>
-              <div className="text-[9px] text-slate-500 italic">Signature & Seal</div>
+              <div className="text-[9px] text-slate-500 italic">Signature &amp; Seal</div>
               <div className="border-t border-black pt-1">
                 <div>Date: _________</div>
               </div>
@@ -8917,7 +9633,7 @@ function AuditReportModal({
             {/* Coordinator */}
             <div className="border border-black p-2 flex flex-col justify-between h-28">
               <div className="font-bold border-b border-black pb-1">Coordinator (Exam Cell)</div>
-              <div className="text-[9px] text-slate-500 italic">Signature & Seal</div>
+              <div className="text-[9px] text-slate-500 italic">Signature &amp; Seal</div>
               <div className="border-t border-black pt-1">
                 <div>Date: _________</div>
               </div>
@@ -8954,7 +9670,7 @@ function AuditReportModal({
           </div>
 
           <div className="text-[9px] text-center text-slate-500 mt-4">
-            Certified that the above examination processes have been executed and verified in compliance with SVKM & University Guidelines.
+            Certified that the above examination processes have been executed and verified in compliance with SVKM &amp; University Guidelines.
           </div>
         </div>
 
@@ -9070,7 +9786,7 @@ function App() {
     let initialContexts = contexts;
 
     if (local) {
-      if (local.config) { initialConfig = local.config; setConfig(local.config); }
+      if (local.config) { const cln = { ...local.config, examCycles: normalizeExamCycles(local.config.examCycles) }; initialConfig = cln; setConfig(cln); }
       if (local.users) { initialUsers = local.users; setUsers(local.users); }
       if (local.activities) { initialActivities = local.activities; setActivities(local.activities); }
       if (local.contexts) { initialContexts = local.contexts; setContexts(local.contexts); }
@@ -9093,7 +9809,7 @@ function App() {
       });
 
       if (res.success && res.data) {
-        if (res.data.config) setConfig(res.data.config);
+        if (res.data.config) setConfig({ ...res.data.config, examCycles: normalizeExamCycles(res.data.config.examCycles) });
         if (res.data.users) setUsers(res.data.users);
         if (res.data.activities) setActivities(res.data.activities);
         if (res.data.contexts) setContexts(res.data.contexts);
@@ -9107,7 +9823,8 @@ function App() {
       unsubscribeSnapshots = StorageService.listenToCloudUpdates(fb.db, {
         onConfigUpdate: (cfg) => {
           if (cfg) {
-            setConfig(cfg);
+            const cln = { ...cfg, examCycles: normalizeExamCycles(cfg.examCycles) };
+            setConfig(cln);
             setCloudStatus("CONNECTED");
             setLastSyncTime(new Date());
             const cur = StorageService.getLocalData() || {};
@@ -9232,6 +9949,13 @@ function App() {
       }));
     }
   }, [currentUser, config.colleges, config.programs]);
+
+  // Ensure context.examCycle is valid ('Regular' or 'Re-Exam')
+  useEffect(() => {
+    if (!["Regular", "Re-Exam"].includes(context.examCycle)) {
+      setContext(prev => ({ ...prev, examCycle: "Regular" }));
+    }
+  }, [context.examCycle]);
 
   // Current Context Key & Data
   const currentContextKey = useMemo(() => {
@@ -9622,7 +10346,8 @@ function App() {
 
   // Admin Config operations
   const handleSaveConfig = (nextConfig) => {
-    setConfig(nextConfig);
+    const cln = { ...nextConfig, examCycles: normalizeExamCycles(nextConfig.examCycles) };
+    setConfig(cln);
     StorageService.saveLocalData({ config: nextConfig, users, activities, contexts });
     StorageService.saveConfigToCloud(dbRef.current, nextConfig);
   };
@@ -9998,9 +10723,10 @@ function App() {
         <main>
           <ExecutiveDashboardView
             activities={activities}
-            contexts={contexts}
+            contexts={allContextsWithActive}
             config={config}
             onNavigateToContextPhase={handleNavigateToContextPhase}
+            onNavigateToContext={handleNavigateToContext}
           />
         </main>
       )}
