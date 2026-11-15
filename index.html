@@ -4158,7 +4158,7 @@ class StorageService {
   static async saveUserToCloud(db, user) {
     if (!db) return;
     try {
-      await db.collection('exam_portal_users').doc(user.id).set(user, { merge: true });
+      await db.collection('exam_portal_users').doc(user.id).set(user);
     } catch (e) {
       console.warn("Failed to save user to Firestore:", e);
     }
@@ -4176,7 +4176,7 @@ class StorageService {
   static async saveConfigToCloud(db, config) {
     if (!db) return;
     try {
-      await db.collection('exam_portal_config').doc('master_data').set(config, { merge: true });
+      await db.collection('exam_portal_config').doc('master_data').set(config);
     } catch (e) {
       console.warn("Failed to save config to Firestore:", e);
     }
@@ -5000,7 +5000,7 @@ function TopNavbar({
               <>
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                 <span className="text-emerald-700 dark:text-emerald-300 font-medium hidden sm:inline">
-                  Connected (svkm-exam-tracker)
+                  Connected
                 </span>
                 <span className="text-emerald-700 dark:text-emerald-300 font-medium sm:hidden">
                   Connected
@@ -5383,10 +5383,11 @@ function ContextBar({
       return allProgs;
     }
     const userCollegeProgs = currentUser.assignedPrograms?.[colId];
-    if (!userCollegeProgs || userCollegeProgs.includes('ALL')) {
+    if (!userCollegeProgs || userCollegeProgs.length === 0 || userCollegeProgs.includes('ALL')) {
       return allProgs;
     }
-    return allProgs.filter(p => userCollegeProgs.includes(p));
+    const normUserProgs = userCollegeProgs.map(p => String(p).trim().toLowerCase());
+    return allProgs.filter(p => normUserProgs.includes(String(p).trim().toLowerCase()));
   };
 
   // Allowed programs for selected college
@@ -8230,13 +8231,17 @@ function StaffFormModal({ user, config, onClose, onSave }) {
   const [password, setPassword] = useState(user?.password || "Pass@123");
   const [role, setRole] = useState(user?.role || "ASST");
   const [isAdmin, setIsAdmin] = useState(!!user?.isAdmin);
-  const [assignedColleges, setAssignedColleges] = useState(user?.assignedColleges || ["NM"]);
+  const validCollegeIds = (config.colleges || []).map(c => c.id);
+  const [assignedColleges, setAssignedColleges] = useState(() => {
+    if (!user?.assignedColleges) return [];
+    return user.assignedColleges.filter(id => id === 'ALL' || validCollegeIds.includes(id));
+  });
   const [assignedPrograms, setAssignedPrograms] = useState(user?.assignedPrograms || {});
   const [active, setActive] = useState(user?.active !== false);
 
   const targetColleges = assignedColleges.includes('ALL')
-    ? config.colleges.map(c => c.id)
-    : assignedColleges;
+    ? validCollegeIds
+    : assignedColleges.filter(id => validCollegeIds.includes(id));
 
   const toggleCollege = (colId) => {
     if (assignedColleges.includes(colId)) {
@@ -9137,14 +9142,17 @@ function App() {
       setShowPasswordModal(true);
     }
 
-    // Check college permission
+    // Check college permission (only against valid colleges in config.colleges)
+    const validColIds = (config.colleges || []).map(c => c.id);
     const allowedCols = currentUser.isAdmin || ['COE', 'DY_COE'].includes(currentUser.role) || currentUser.assignedColleges?.includes('ALL')
-      ? config.colleges.map(c => c.id)
-      : currentUser.assignedColleges || [];
+      ? validColIds
+      : (currentUser.assignedColleges || []).filter(id => validColIds.includes(id));
 
     let targetCol = context.college;
     if (allowedCols.length > 0 && !allowedCols.includes(context.college)) {
       targetCol = allowedCols[0];
+    } else if (allowedCols.length === 0 && validColIds.length > 0 && !validColIds.includes(context.college)) {
+      targetCol = validColIds[0];
     }
 
     // Check program permission for targetCol
@@ -9152,8 +9160,9 @@ function App() {
     let allowedProgs = allProgsForCollege;
     if (!currentUser.isAdmin && !['COE', 'DY_COE'].includes(currentUser.role) && !currentUser.assignedColleges?.includes('ALL')) {
       const userCollegeProgs = currentUser.assignedPrograms?.[targetCol];
-      if (userCollegeProgs && !userCollegeProgs.includes('ALL')) {
-        allowedProgs = allProgsForCollege.filter(p => userCollegeProgs.includes(p));
+      if (userCollegeProgs && userCollegeProgs.length > 0 && !userCollegeProgs.includes('ALL')) {
+        const normUserProgs = userCollegeProgs.map(p => String(p).trim().toLowerCase());
+        allowedProgs = allProgsForCollege.filter(p => normUserProgs.includes(String(p).trim().toLowerCase()));
       }
     }
 
