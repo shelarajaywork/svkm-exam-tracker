@@ -7973,9 +7973,31 @@ function AdminPanel({
                 <Icon name="calendar" size={16} className="text-indigo-600" />
               </h3>
 
-              <div className="space-y-1.5 mt-3 max-h-[260px] overflow-y-auto pr-1">
-                {config.batches.map(b => (
-                  editingBatchVal === b ? (
+              {/* NEW: Current Academic Year Default Selector */}
+              <div className="mt-3 p-2.5 bg-indigo-50/70 dark:bg-indigo-950/30 rounded-xl border border-indigo-200 dark:border-indigo-900/60 flex items-center justify-between gap-2 text-xs">
+                <div>
+                  <div className="font-bold text-indigo-950 dark:text-indigo-200">Current Academic Year</div>
+                  <div className="text-[10px] text-indigo-600 dark:text-indigo-400">Default Batch for all users</div>
+                </div>
+                <select
+                  value={config.currentBatch || config.batches[0] || ""}
+                  onChange={(e) => {
+                    const selectedBatch = e.target.value;
+                    onSaveConfig({ ...config, currentBatch: selectedBatch });
+                    showToast(`Current Academic Year set to ${selectedBatch}`, "success");
+                  }}
+                  className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-indigo-300 dark:border-indigo-700 rounded-lg font-mono font-bold text-indigo-700 dark:text-indigo-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                >
+                  {config.batches.map(b => (
+                    <option key={b} value={b}>{b}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1.5 mt-3 max-h-[210px] overflow-y-auto pr-1">
+                {config.batches.map(b => {
+                  const isCurrent = (config.currentBatch || config.batches[0]) === b;
+                  return editingBatchVal === b ? (
                     <div key={b} className="flex items-center gap-1.5 p-1.5 bg-indigo-50/70 dark:bg-indigo-950/40 rounded-xl border border-indigo-200 dark:border-indigo-800 text-xs">
                       <input
                         type="text"
@@ -8004,8 +8026,27 @@ function AdminPanel({
                     </div>
                   ) : (
                     <div key={b} className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl text-xs font-mono font-bold">
-                      <span>{b}</span>
+                      <div className="flex items-center gap-2">
+                        <span>{b}</span>
+                        {isCurrent && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-sans font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300">
+                            Current
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1">
+                        {!isCurrent && (
+                          <button
+                            onClick={() => {
+                              onSaveConfig({ ...config, currentBatch: b });
+                              showToast(`Current Academic Year set to ${b}`, "success");
+                            }}
+                            className="px-1.5 py-0.5 text-[10px] font-sans font-semibold text-indigo-600 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950/50 rounded"
+                            title="Set as Current Academic Year"
+                          >
+                            Set Current
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             setEditingBatchVal(b);
@@ -8028,7 +8069,8 @@ function AdminPanel({
                               type: "danger",
                               onConfirm: () => {
                                 const next = config.batches.filter(x => x !== b);
-                                onSaveConfig({ ...config, batches: next });
+                                const nextCurrent = config.currentBatch === b ? (next[0] || "") : config.currentBatch;
+                                onSaveConfig({ ...config, batches: next, currentBatch: nextCurrent });
                                 showToast(`Deleted batch ${b}`, "info");
                               }
                             });
@@ -8040,8 +8082,8 @@ function AdminPanel({
                         </button>
                       </div>
                     </div>
-                  )
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -8071,7 +8113,6 @@ function AdminPanel({
               </button>
             </div>
           </div>
-
         </div>
       )}
 
@@ -8943,11 +8984,15 @@ function App() {
     colleges: INITIAL_COLLEGES,
     programs: INITIAL_PROGRAMS,
     batches: INITIAL_BATCHES,
+    currentBatch: "2025-26",
     phases: INITIAL_PHASES,
     semesters: INITIAL_SEMESTERS,
     examCycles: INITIAL_EXAM_CYCLES,
     hideDemoLogins: false
   }));
+
+
+  
 
   const [users, setUsers] = useState(INITIAL_USERS);
   const [activities, setActivities] = useState(INITIAL_ACTIVITIES);
@@ -9001,13 +9046,13 @@ function App() {
   const dbRef = useRef(null);
 
   // Active Context
-  const [context, setContext] = useState({
+  const [context, setContext] = useState(() => ({
     college: "NM",
-    batch: "2025-26",
+    batch: config.currentBatch || config.batches?.[0] || "2025-26",
     program: "B.Com",
     semester: "Sem I",
     examCycle: "Regular"
-  });
+  }));
 
   // Modals
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -9134,6 +9179,14 @@ function App() {
       }
     }
   }, [users]);
+
+// Sync default Batch for all users when currentBatch loads from Cloud/Storage or on User Login
+  useEffect(() => {
+    const defaultBatch = config.currentBatch || config.batches?.[0];
+    if (defaultBatch && config.batches?.includes(defaultBatch)) {
+      setContext(prev => (prev.batch === defaultBatch ? prev : { ...prev, batch: defaultBatch }));
+    }
+  }, [config.currentBatch, currentUser?.id]);
 
   // When user logs in, ensure their active context is valid for their permissions
   useEffect(() => {
@@ -9604,6 +9657,7 @@ function App() {
             colleges: INITIAL_COLLEGES,
             programs: INITIAL_PROGRAMS,
             batches: INITIAL_BATCHES,
+            currentBatch: "2025-26",
             phases: INITIAL_PHASES,
             semesters: INITIAL_SEMESTERS,
             examCycles: INITIAL_EXAM_CYCLES,
@@ -9768,7 +9822,8 @@ function App() {
 
   const handleCascadeRenameBatch = (oldBatch, newBatch) => {
     const nextBatches = config.batches.map(b => b === oldBatch ? newBatch : b);
-    const nextConfig = { ...config, batches: nextBatches };
+    const nextCurrentBatch = config.currentBatch === oldBatch ? newBatch : config.currentBatch;
+    const nextConfig = { ...config, batches: nextBatches, currentBatch: nextCurrentBatch };
     setConfig(nextConfig);
 
     const nextContexts = {};
